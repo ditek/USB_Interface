@@ -36,6 +36,14 @@
 
 #include "USBtoSerial.h"
 
+void startup_seq();
+/* Receive a byte from USB interface and store in Buffer */
+void receive_usb_byte(RingBuffer_t* const Buffer);
+/* Sends all the bytes stored in Buffer to USB endpoint */
+void flush_buffer_to_usb(RingBuffer_t* const Buffer);
+/* Sends one byte from USBtoUART_Buffer to UART */
+void flush_byte_to_uart(RingBuffer_t* const Buffer);
+
 /** Circular buffer to hold data from the host before it is sent to the device via the serial port. */
 static RingBuffer_t USBtoUSART_Buffer;
 
@@ -85,66 +93,26 @@ USB_ClassInfo_CDC_Device_t VirtualSerial_CDC_Interface =
 int main(void)
 {
 	SetupHardware();
-
+	startup_seq();
+	
 	RingBuffer_InitBuffer(&USBtoUSART_Buffer, USBtoUSART_Buffer_Data, sizeof(USBtoUSART_Buffer_Data));
 	RingBuffer_InitBuffer(&USARTtoUSB_Buffer, USARTtoUSB_Buffer_Data, sizeof(USARTtoUSB_Buffer_Data));
 
-	LEDs_TurnOffLEDs(LEDMASK_USB_NOTREADY);
+	LEDs_TurnOffLEDs(LEDS_ALL_LEDS);
 	GlobalInterruptEnable();
 
-	//DDRF  =  0xff;
-	//PORTF = 0xff;
-	for (;;)
+	while(1)
 	{
-		/* Only try to read in bytes from the CDC interface if the transmit buffer is not full */
-		if (!(RingBuffer_IsFull(&USBtoUSART_Buffer)))
-		{
-			int16_t ReceivedByte = CDC_Device_ReceiveByte(&VirtualSerial_CDC_Interface);
-
-			/* Store received byte into the USART transmit buffer */
-			if (!(ReceivedByte < 0))
-			{
-				RingBuffer_Insert(&USBtoUSART_Buffer, ReceivedByte);
-				RingBuffer_Insert(&USARTtoUSB_Buffer, ReceivedByte);
-			}
-		}
-
-		uint16_t BufferCount = RingBuffer_GetCount(&USARTtoUSB_Buffer);
-		if (BufferCount)
-		{
-			Endpoint_SelectEndpoint(VirtualSerial_CDC_Interface.Config.DataINEndpoint.Address);
-
-			/* Check if a packet is already enqueued to the host - if so, we shouldn't try to send more data
-			 * until it completes as there is a chance nothing is listening and a lengthy timeout could occur */
-			if (Endpoint_IsINReady())
-			{
-				/* Never send more than one bank size less one byte to the host at a time, so that we don't block
-				 * while a Zero Length Packet (ZLP) to terminate the transfer is sent if the host isn't listening */
-				uint8_t BytesToSend = MIN(BufferCount, (CDC_TXRX_EPSIZE - 1));
-
-				/* Read bytes from the USART receive buffer into the USB IN endpoint */
-				while (BytesToSend--)
-				{
-					/* Try to send the next byte of data to the host, abort if there is an error without dequeuing */
-					if (CDC_Device_SendByte(&VirtualSerial_CDC_Interface,
-											RingBuffer_Peek(&USARTtoUSB_Buffer)) != ENDPOINT_READYWAIT_NoError)
-					{
-						break;
-					}
-
-					/* Dequeue the already sent byte from the buffer now we have confirmed that no transmission error occurred */
-					RingBuffer_Remove(&USARTtoUSB_Buffer);
-				}
-			}
-		}
-
+		receive_usb_byte(&USBtoUSART_Buffer);
+		
+		flush_buffer_to_usb(&USARTtoUSB_Buffer);			
+		
 		/* Load the next byte from the USART transmit buffer into the USART if transmit buffer space is available */
-		if (Serial_IsSendReady() && !(RingBuffer_IsEmpty(&USBtoUSART_Buffer)))
-		  Serial_SendByte(RingBuffer_Remove(&USBtoUSART_Buffer));
-
+		flush_byte_to_uart(&USBtoUSART_Buffer);
+		
+		/* These functions should be called frequently for proper USB operation */
 		CDC_Device_USBTask(&VirtualSerial_CDC_Interface);
 		USB_USBTask();
-		//LEDs_SetAllLEDs(LEDS_ALL_LEDS);
 	}
 }
 
@@ -161,6 +129,74 @@ void SetupHardware(void)
 	/* Hardware Initialization */
 	LEDs_Init();
 	USB_Init();
+}
+
+void startup_seq()
+{
+	LEDs_SetAllLEDs(LEDS_ALL_LEDS);
+	_delay_ms(500);
+	LEDs_SetAllLEDs(LEDS_LED1);
+	_delay_ms(500);
+	LEDs_SetAllLEDs(LEDS_LED2);
+	_delay_ms(500);
+	LEDs_TurnOffLEDs(LEDS_ALL_LEDS);
+}
+
+/* Receive a byte from USB interface and store in Buffer */
+void receive_usb_byte(RingBuffer_t* const Buffer)
+{
+	/* Only try to read in bytes from the CDC interface if the transmit buffer is not full */
+	if (!(RingBuffer_IsFull(Buffer)))
+	{
+		int16_t ReceivedByte = CDC_Device_ReceiveByte(&VirtualSerial_CDC_Interface);
+
+		/* Store received byte into the USART transmit buffer */
+		if (!(ReceivedByte < 0))
+			RingBuffer_Insert(Buffer, ReceivedByte);
+	}
+}
+
+/* Sends all the bytes stored in Buffer to USB endpoint */
+void flush_buffer_to_usb(RingBuffer_t* const Buffer)
+{
+	uint16_t BufferCount = RingBuffer_GetCount(Buffer);
+	//bool done = false;
+	if (BufferCount)
+	{
+		Endpoint_SelectEndpoint(VirtualSerial_CDC_Interface.Config.DataINEndpoint.Address);
+
+		/* Check if a packet is already enqueued to the host - if so, we shouldn't try to send more data
+			* until it completes as there is a chance nothing is listening and a lengthy timeout could occur */
+		if (Endpoint_IsINReady())
+		{
+			/* Never send more than one bank size less one byte to the host at a time, so that we don't block
+				* while a Zero Length Packet (ZLP) to terminate the transfer is sent if the host isn't listening */
+			uint8_t BytesToSend = MIN(BufferCount, (CDC_TXRX_EPSIZE - 1));
+
+			/* Read bytes from the USART receive buffer into the USB IN endpoint */
+			while (BytesToSend--)
+			{
+				/* Try to send the next byte of data to the host, abort if there is an error without dequeuing */
+				if (CDC_Device_SendByte(&VirtualSerial_CDC_Interface,
+										RingBuffer_Peek(Buffer)) != ENDPOINT_READYWAIT_NoError)
+				{
+					break;
+				}
+
+				/* Dequeue the already sent byte from the buffer now we have confirmed that no transmission error occurred */
+				RingBuffer_Remove(Buffer);
+			}
+		}
+	}
+	//return done;
+}
+
+/* Sends one byte from USBtoUART_Buffer to UART */
+void flush_byte_to_uart(RingBuffer_t* const Buffer)
+{
+	/* Load the next byte from the transmit buffer into the USART if transmit buffer space is available */
+	if (Serial_IsSendReady() && !(RingBuffer_IsEmpty(Buffer)))
+		Serial_SendByte(RingBuffer_Remove(Buffer));
 }
 
 /** Event handler for the library USB Connection event. */
