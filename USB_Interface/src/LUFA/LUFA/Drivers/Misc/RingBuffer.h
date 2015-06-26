@@ -296,6 +296,13 @@
 		{
 			return *Buffer->Out;
 		}
+		
+		void RingBuffer_Flush(RingBuffer_t* const Buffer);
+		void RingBuffer_Flush(RingBuffer_t* const Buffer)
+		{
+			Buffer->In = Buffer->Out = Buffer->Start;
+			Buffer->Count = 0;
+		}
 
 	/* Disable C linkage for C++ Compilers: */
 		#if defined(__cplusplus)

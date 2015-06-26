@@ -42,6 +42,19 @@
 		#include <avr/interrupt.h>
 		#include <avr/power.h>
 
+		#include <string.h>
+		#include <avr/pgmspace.h>
+		#include <avr/sleep.h>
+		#include <util/delay.h>
+		#include <stdlib.h>
+		#include <stdio.h>
+		#include "sd/fat.h"
+		#include "sd/fat_config.h"
+		#include "sd/partition.h"
+		#include "sd/sd_raw.h"
+		#include "sd/sd_raw_config.h"
+		#include "uart.h"
+
 		#include "Descriptors.h"
 
 		#include <LUFA/Drivers/Board/LEDs.h>
@@ -51,7 +64,7 @@
 		#include <LUFA/Platform/Platform.h>
 
 		//#include <Lufa/Common/Common.h>				// Contains some useful basic function
-		#include <Lufa/Drivers/Peripheral/SPI.h>
+		//#include <Lufa/Drivers/Peripheral/SPI.h>
 
 	/* Macros: */
 		/** LED mask for the library LED driver, to indicate that the USB interface is not ready. */
@@ -75,6 +88,26 @@
 		void EVENT_USB_Device_ControlRequest(void);
 
 		void EVENT_CDC_Device_LineEncodingChanged(USB_ClassInfo_CDC_Device_t* const CDCInterfaceInfo);
+		
+		static uint8_t read_line(char* buffer, uint8_t buffer_length);
+		static uint32_t strtolong(const char* str);
+		static uint8_t find_file_in_dir(struct fat_fs_struct* fs, struct fat_dir_struct* dd, const char* name, struct fat_dir_entry_struct* dir_entry);
+		static struct fat_file_struct* open_file_in_dir(struct fat_fs_struct* fs, struct fat_dir_struct* dd, const char* name);
+// 		static uint8_t print_disk_info(const struct fat_fs_struct* fs);
+
+		char wait_for_answer();
+		char make_file(struct fat_fs_struct* fs, struct fat_dir_struct* dd,char* command);
+		char exec_cmd(struct fat_fs_struct* fs, struct fat_dir_struct* dd,char* command);
+		void cmd_cd(struct fat_fs_struct* fs, struct fat_dir_struct* dd,char* command);
+		void cmd_ls(struct fat_fs_struct* fs, struct fat_dir_struct* dd,char* command);
+		void cmd_cat(struct fat_fs_struct* fs, struct fat_dir_struct* dd,char* command);
+		void cmd_rm(struct fat_fs_struct* fs, struct fat_dir_struct* dd,char* command);
+		void cmd_touch(struct fat_fs_struct* fs, struct fat_dir_struct* dd,char* command);
+		void cmd_write(struct fat_fs_struct* fs, struct fat_dir_struct* dd,char* command);
+		void cmd_mkdir(struct fat_fs_struct* fs, struct fat_dir_struct* dd,char* command);
+		void cmd_test(struct fat_fs_struct* fs, struct fat_dir_struct* dd,char* command);
+		//void cmd_cd(struct fat_fs_struct* fs, struct fat_dir_struct* dd,char* command);
+		//void cmd_cd(struct fat_fs_struct* fs, struct fat_dir_struct* dd,char* command);
 
 #endif
 
