@@ -303,6 +303,29 @@
 			Buffer->In = Buffer->Out = Buffer->Start;
 			Buffer->Count = 0;
 		}
+		
+		static inline void RingBuffer_InsertString(RingBuffer_t* Buffer, char* string) ATTR_NON_NULL_PTR_ARG(1);
+		static inline void RingBuffer_InsertString(RingBuffer_t* Buffer, char* string)
+		{
+			GCC_FORCE_POINTER_ACCESS(Buffer);
+			
+			uint8_t i=0;
+			while(string[i] != 0)
+			{
+				*Buffer->In = string[i];
+
+				if (++Buffer->In == Buffer->End)
+				Buffer->In = Buffer->Start;
+
+				uint_reg_t CurrentGlobalInt = GetGlobalInterruptMask();
+				GlobalInterruptDisable();
+
+				Buffer->Count++;
+
+				SetGlobalInterruptMask(CurrentGlobalInt);
+				i++;
+			}			
+		}
 
 	/* Disable C linkage for C++ Compilers: */
 		#if defined(__cplusplus)

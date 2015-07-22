@@ -54,10 +54,16 @@ void receive_usb_byte(RingBuffer_t* const Buffer);
 void flush_buffer_to_usb(RingBuffer_t* const Buffer);
 /* Sends one byte from USBtoUART_Buffer to UART */
 void flush_byte_to_uart(RingBuffer_t* const Buffer);
+/* Sends one byte to PC */
+void send_pc(char c);
+bool wait_for_answer_pc(char* data);
 
+typedef enum {TEST, MEMORY_READ_SD, MEMORY_READ_PC, CONFIG, IDLE, FAILURE, SUCCESS, INIT_FAILED, FATAL_ERROR} State_t;
+State_t state = IDLE;
 
 const char* CRLF = "\r\n";
-char buffer[20];
+char buffer[50];
+
 static RingBuffer_t Buffer_Rx;
 static uint8_t      Buffer_Rx_Data[256];
 
@@ -113,7 +119,9 @@ USB_ClassInfo_CDC_Device_t VirtualSerial_CDC_Interface =
  */
 int main(void)
 {
+	uint8_t attempts = 0;
 	SetupHardware();
+	// Put '1' on the bus multiplexer selection pin to take control over the SPI bus.
 	DDRB |= (1<<7) ;
 	PORTB |= (1<<7) ;
 
@@ -131,118 +139,307 @@ int main(void)
 
 	while(1)
 	{
-#ifdef TESTER
-		if(!sd_raw_init())
-			continue;
-
-		/* open first partition */
-		struct partition_struct* partition = partition_open(sd_raw_read, sd_raw_read_interval, sd_raw_write, sd_raw_write_interval, 0);
-
-		if(!partition)
-		{
-			/* If the partition did not open, assume the storage device is a "superfloppy", i.e. has no MBR. */
-			partition = partition_open(sd_raw_read, sd_raw_read_interval, sd_raw_write, sd_raw_write_interval, -1);
-			if(!partition)
-				soft_reset();
-		}
-
-		/* open file system */
-		struct fat_fs_struct* fs = fat_open(partition);
-		if(!fs)		
-			soft_reset();		// Sometimes this causes hanging. Reset the device
-
-		/* open root directory */
-		struct fat_dir_entry_struct directory;
-		fat_get_dir_entry_of_path(fs, "/", &directory);
-
-		struct fat_dir_struct* dd = fat_open_dir(fs, &directory);
-		if(!dd)
-			continue;
-
-		char success = 0;
-		char filename_available = 0;
-		volatile uint8_t  errors = 0;
-		RingBuffer_Flush(&Buffer_Rx);
-
-		uart_putc('t');
-
-		if(wait_for_answer() == 's')
-		{
-			char filename[10];
-			char filenum[4];
-	
-			for(char i=0; i<100; i++)
+		switch(state)
+		{			
+			case MEMORY_READ_SD:
 			{
-				strcpy(filename, "dump");
-				strcat(filename, itoa(i, filenum, 10));
-				struct fat_dir_entry_struct subdir_entry;
-				if(!find_file_in_dir(fs, dd, filename, &subdir_entry))
+				state = FAILURE;
+				attempts++;
+				if(!sd_raw_init())
 				{
-					filename_available = 1;
-					break;
-				}
-			}
-			if(filename_available)
-			{
-				filename_available = 0;
-				// Create the file
-				if(!make_file(fs, dd, filename))
-				continue;
-		
-				// Check if slave is ready for memory transfer
-				uart_putc('r');
-				if(wait_for_answer() == 'a')
-				{
-					// Open the file
-					struct fat_file_struct* fd = open_file_in_dir(fs, dd, filename);
-					if(fd)
+					if(attempts>10)
 					{
-						uart_putc('m');
-						if(wait_for_answer() == 'a')
-						{
-							uint8_t data_len;
-							volatile int i;
-							for(i=0; i<512; i++)
-							{	
-								data_len = read_line(buffer, sizeof(buffer)-3);
-								if(!data_len)
-								{
-									errors++;
-									continue;
-								}
-								strcat(buffer, CRLF);
-								data_len += 2;
-								/* write text to file */
-								if(fat_write_file(fd, (uint8_t*) buffer, data_len) != data_len)
-								{
-									break;
-								}
-							}
-							fat_close_file(fd);
-							if(i == 512)
-							success = 1;
-						}
+						attempts = 0;
+						state = INIT_FAILED;
+					}
+					continue;
+				}
+				/* open first partition */
+				struct partition_struct* partition = partition_open(sd_raw_read, sd_raw_read_interval, sd_raw_write, sd_raw_write_interval, 0);
+
+				if(!partition)
+				{
+					/* If the partition did not open, assume the storage device is a "superfloppy", i.e. has no MBR. */
+					partition = partition_open(sd_raw_read, sd_raw_read_interval, sd_raw_write, sd_raw_write_interval, -1);
+					if(!partition)
+					{	
+						state = FATAL_ERROR;
+						continue;
 					}
 				}
+
+				/* open file system */
+				struct fat_fs_struct* fs = fat_open(partition);
+				if(!fs)		
+				{
+					state = FATAL_ERROR;		// Sometimes this causes hanging. Reset the device		
+					continue;
+				}		
+			
+				/* open root directory */
+				struct fat_dir_entry_struct directory;
+				fat_get_dir_entry_of_path(fs, "/", &directory);
+
+				struct fat_dir_struct* dd = fat_open_dir(fs, &directory);
+				if(!dd)
+				{
+					if(attempts>10)
+					{
+						attempts = 0;
+						state = FAILURE;
+					}
+					continue;
+				}
+
+				char filename_available = 0;
+				volatile uint8_t  errors = 0;
+				char filename[10];
+				char filenum[4];
+				
+				RingBuffer_Flush(&Buffer_Rx);
+				RingBuffer_Flush(&Buffer_Rx_USB);
+				
+				// Tell user that set up is successful			
+				RingBuffer_InsertString(&Buffer_Tx_USB, "s\n");
+				flush_buffer_to_usb(&Buffer_Tx_USB);
+						
+				for(uint8_t i=0; i<255; i++)
+				{
+					strcpy(filename, "dump");
+					strcat(filename, itoa(i, filenum, 10));
+					struct fat_dir_entry_struct subdir_entry;
+					if(!find_file_in_dir(fs, dd, filename, &subdir_entry))
+					{
+						filename_available = 1;
+						break;
+					}
+				}
+				if(filename_available)
+				{
+					filename_available = 0;
+					// Create the file
+					if(!make_file(fs, dd, filename))
+					{
+						state = FAILURE;
+						continue;
+					}
+					// Check if FPGA is ready for memory transfer
+					uart_putc('r');
+					if(wait_for_answer() != 'a')
+					{
+						state = FAILURE;
+						continue;
+					}
+					// Open the file
+					struct fat_file_struct* fd = open_file_in_dir(fs, dd, filename);
+					if(!fd)
+					{
+						state = FAILURE;
+						continue;
+					}
+				
+					// Send memory transfer command to FPGA
+					uart_putc('m');
+					if(wait_for_answer() != 'a')
+					{
+						state = FAILURE;
+						continue;
+					}
+					uint8_t data_len;
+					volatile int i;
+					
+					// Report that memory read will start			
+					RingBuffer_InsertString(&Buffer_Tx_USB, "m\n");
+					flush_buffer_to_usb(&Buffer_Tx_USB);
+								
+					for(i=0; i<512; i++)
+					{	
+						// Receive 17 characters (16 +'\n')			
+						data_len = read_line(buffer, sizeof(buffer)-3);
+						if(!data_len)
+						{
+							errors++;
+							continue;
+						}
+		
+						// Concatenate '\r\n' for a new line
+						strcat(buffer, CRLF);
+						data_len += 2;
+						
+						// Write buffer to PC
+						RingBuffer_InsertString(&Buffer_Tx_USB, buffer);
+						flush_buffer_to_usb(&Buffer_Tx_USB);
+						
+						/* write text to file */
+						if(fat_write_file(fd, (uint8_t*) buffer, data_len) != data_len)
+							break;
+					}
+					fat_close_file(fd);
+					if(i == 512)
+						state = SUCCESS;				
+				}
+
+				if(state == SUCCESS)
+					uart_putc('s');
+					
+				fat_close(fs);
+				partition_close(partition);
+
+				break;
 			}
+			
+			case MEMORY_READ_PC:
+			{
+				volatile uint8_t  errors = 0;
+				state = FAILURE;
+											
+				// Tell user that set up is successful
+				RingBuffer_InsertString(&Buffer_Tx_USB, "s\n");
+				flush_buffer_to_usb(&Buffer_Tx_USB);
+
+				// Check if FPGA is ready for memory transfer
+				uart_putc('r');
+				if(wait_for_answer() != 'a')	// Acknowledge
+					continue;
+
+				// Send memory transfer command to FPGA
+				uart_putc('m');
+				if(wait_for_answer() != 'a')	// Acknowledge
+					continue;
+				uint8_t data_len;
+ 				volatile int i;
+								
+				// Report that memory read will start
+				RingBuffer_InsertString(&Buffer_Tx_USB, "m\n");
+				flush_buffer_to_usb(&Buffer_Tx_USB);
+								
+				for(i=0; i<512; i++)
+				{
+					// Receive 17 characters (16 +'\n')
+					data_len = read_line(buffer, sizeof(buffer));
+					if(!data_len)
+					{
+						errors++;
+						continue;
+					}			
+					// Concatenate '\r\n' for a new line
+					strcat(buffer, CRLF);
+
+					// Write buffer to PC
+					RingBuffer_InsertString(&Buffer_Tx_USB, buffer);
+					flush_buffer_to_usb(&Buffer_Tx_USB);
+				}
+				if(i == 512)
+				{	
+					state = SUCCESS;
+					uart_putc('s');
+				}
+				break;
+			}
+			
+			case TEST:
+			{
+				// Send 'start test' command to FPGA
+				uart_putc('t');
+
+				if(wait_for_answer() == 's')
+					state = SUCCESS;
+				else
+					state = FAILURE;
+				break;
+			}
+			
+			case CONFIG:
+			{
+				state = FAILURE;
+				// Send 'config' command to FPGA
+				uart_putc('c');
+
+				if(wait_for_answer() != 'a')
+					break;
+				send_pc('a');
+				char i, data;
+				for(i=0; i<8; i++)
+				{
+					if(!wait_for_answer_pc(&data))
+						break;
+					uart_putc(data);
+				}
+				if(i<8)
+					break;
+				if(wait_for_answer() != 's')
+					break;
+				state = SUCCESS;
+				break;
+			}
+			
+			case FAILURE:
+			{
+				state = IDLE;
+				RingBuffer_InsertString(&Buffer_Tx_USB, "f\n");
+				flush_buffer_to_usb(&Buffer_Tx_USB);
+				break;
+			}
+			
+			case INIT_FAILED:
+			{
+				state = IDLE;
+				RingBuffer_InsertString(&Buffer_Tx_USB, "i\n");
+				flush_buffer_to_usb(&Buffer_Tx_USB);
+				break;
+			}
+			
+			case FATAL_ERROR:
+			{
+				state = IDLE;
+				RingBuffer_InsertString(&Buffer_Tx_USB, "e\n");
+				flush_buffer_to_usb(&Buffer_Tx_USB);
+// 				soft_reset();
+				break;
+			}		
+			
+			case SUCCESS:
+			{
+				state = IDLE;
+				RingBuffer_InsertString(&Buffer_Tx_USB, "s\n");
+				flush_buffer_to_usb(&Buffer_Tx_USB);
+				break;
+			}
+			
+			case IDLE:
+			{
+				receive_usb_byte(&Buffer_Rx_USB);
+		
+				if(!RingBuffer_IsEmpty(&Buffer_Rx_USB))
+				{
+					uint8_t data = RingBuffer_Remove(&Buffer_Rx_USB);
+					switch(data)
+					{
+						case 't':
+							state = TEST;
+							break;
+						case 'm':
+							state = MEMORY_READ_SD;
+							break;
+						case 'p':
+							state = MEMORY_READ_PC;
+							break;
+						case 'c':
+							state = CONFIG;
+							break;
+						default:
+							break;
+					}
+				}
+				//flush_buffer_to_usb(&Buffer_Tx_USB);			
+				// Flush the transmit buffer
+				RingBuffer_Flush(&Buffer_Tx_USB);		
+				// Flush the reception buffer in case multiple commands are sent
+				RingBuffer_Flush(&Buffer_Rx_USB);
+				RingBuffer_Flush(&Buffer_Rx);	
+			}	
 		}
-		if(success)
-			uart_putc('s');
-		_delay_ms(5000);
-		fat_close(fs);
-		partition_close(partition);
 
-#endif
-
-
-
-		receive_usb_byte(&Buffer_Rx_USB);
-		
-		flush_buffer_to_usb(&Buffer_Tx_USB);			
-		
-		/* Load the next byte from the USART transmit buffer into the USART if transmit buffer space is available */
-		flush_byte_to_uart(&Buffer_Rx_USB);
-		
 		/* These functions should be called frequently for proper USB operation */
 		CDC_Device_USBTask(&VirtualSerial_CDC_Interface);
 		USB_USBTask();
@@ -261,7 +458,7 @@ void SetupHardware(void)
 
 	/* Hardware Initialization */
 	LEDs_Init();
-// 	USB_Init();
+ 	USB_Init();
 }
 
 void startup_seq()
@@ -321,6 +518,8 @@ void flush_buffer_to_usb(RingBuffer_t* const Buffer)
 			}
 		}
 	}
+	CDC_Device_USBTask(&VirtualSerial_CDC_Interface);
+	USB_USBTask();
 	//return done;
 }
 
@@ -373,7 +572,7 @@ ISR(USART1_RX_vect, ISR_BLOCK)
 	uint8_t ReceivedByte = UDR1;
 
 	if ( !RingBuffer_IsFull(&Buffer_Rx))
-	RingBuffer_Insert(&Buffer_Rx, ReceivedByte);
+		RingBuffer_Insert(&Buffer_Rx, ReceivedByte);
 }
 
 /** Event handler for the CDC Class driver Line Encoding Changed event.
@@ -430,16 +629,33 @@ void EVENT_CDC_Device_LineEncodingChanged(USB_ClassInfo_CDC_Device_t* const CDCI
 	PORTD &= ~(1 << 3);
 }
 
-// Waits 10ms for an answer from slave
+// Waits 1000ms for an answer from slave
 char wait_for_answer()
 {
-	for(char i=0; i<100; i++)
+	for(int i=0; i<1000; i++)
 	{
-		_delay_ms(100);
+		_delay_ms(1);
 		if(!RingBuffer_IsEmpty(&Buffer_Rx))
 		return RingBuffer_Remove(&Buffer_Rx);
 	}
 	return 0;
+}
+
+// Waits 1000ms for an answer from PC
+bool wait_for_answer_pc(char* data)
+{
+	for(int i=0; i<1000; i++)
+	{
+		receive_usb_byte(&Buffer_Rx_USB);
+		
+		if(!RingBuffer_IsEmpty(&Buffer_Rx_USB))
+		{	
+			*data = RingBuffer_Remove(&Buffer_Rx_USB);
+			return true;
+		}
+		_delay_ms(1);
+	}
+	return false;
 }
 
 char make_file(struct fat_fs_struct* fs, struct fat_dir_struct* dd,char* filename)
@@ -458,21 +674,12 @@ uint8_t read_line(char* buffer, uint8_t buffer_length)
 	while(read_length < buffer_length - 1)
 	{
 		uint8_t c;
-		uint16_t i=0;
+		uint32_t i=0;
 		// If nothing is received for a while report failure
 		while(RingBuffer_IsEmpty(&Buffer_Rx))
-		if(i++>1000)
-		return 0;
+			if(i++>100000)
+				return 0;
 		c = RingBuffer_Remove(&Buffer_Rx);
-
-		//if(c == 0x08 || c == 0x7f)
-		//{
-		//if(read_length < 1)
-		//continue;
-		//--read_length;
-		//buffer[read_length] = '\0';
-		//continue;
-		//}
 
 		if(c == '\n')
 		{
@@ -489,14 +696,14 @@ uint8_t read_line(char* buffer, uint8_t buffer_length)
 	return read_length;
 }
 
-// uint32_t strtolong(const char* str)
-// {
-// 	uint32_t l = 0;
-// 	while(*str >= '0' && *str <= '9')
-// 	l = l * 10 + (*str++ - '0');
-// 
-// 	return l;
-// }
+uint32_t strtolong(const char* str)
+{
+	uint32_t l = 0;
+	while(*str >= '0' && *str <= '9')
+	l = l * 10 + (*str++ - '0');
+
+	return l;
+}
 
 uint8_t find_file_in_dir(struct fat_fs_struct* fs, struct fat_dir_struct* dd, const char* name, struct fat_dir_entry_struct* dir_entry)
 {
@@ -519,4 +726,12 @@ struct fat_file_struct* open_file_in_dir(struct fat_fs_struct* fs, struct fat_di
 	return 0;
 
 	return fat_open_file(fs, &file_entry);
+}
+
+void send_pc(char c)
+{
+	char* msg = "c\n";
+	msg[0] = c;
+	RingBuffer_InsertString(&Buffer_Tx_USB, msg);
+	flush_buffer_to_usb(&Buffer_Tx_USB);
 }

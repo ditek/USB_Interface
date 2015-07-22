@@ -97,8 +97,8 @@ void uart_init()
 
 void uart_putc(uint8_t c)
 {
-    if(c == '\n')
-        uart_putc('\r');
+//     if(c == '\n')
+//         uart_putc('\r');
 
     /* wait until transmit buffer is empty */
     while(!(UCSRA & (1 << UDRE)));
